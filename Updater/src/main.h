@@ -190,19 +190,11 @@ public:
         const std::vector<std::string>& Paths
     );
 
-    void SetSessionId(
-        const std::string& NewSessionId
-    );
-
-    const std::string& GetSessionId() const;
-
     void SetProgressCallback(
         ProgressCallback Callback
     );
 
 private:
-
-    std::string SessionId;
 
     ProgressCallback Progress;
 };
@@ -232,12 +224,6 @@ public:
         const Manifest& ManifestData,
         bool CfgOnly
     );
-
-    void SetSessionId(
-        const std::string& SessionId
-    );
-
-    const std::string& GetSessionId() const;
 
 private:
 
@@ -334,34 +320,11 @@ private:
 
 private:
 
-    // ========================================================
-    // Session
-    // ========================================================
-
-    bool LoadOrCreateSession();
-
-    bool LoadSession();
-
-    bool CreateSession();
-
-    std::string GenerateSessionId() const;
-
-    bool SaveSession() const;
-
-private:
-
     ManifestManager ManifestManager;
 
     FileScanner FileScanner;
 
     FileUpdater FileUpdater;
-
-    std::string SessionId;
-
-    fs::path SessionPath =
-        "Session.txt";
-
-    bool SessionPrinted = false;
 
 
     // ========================================================

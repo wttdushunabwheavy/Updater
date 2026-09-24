@@ -13,7 +13,6 @@
 #include <cctype>
 #include <thread>
 #include <vector>
-#include <chrono>
 #include <system_error>
 #include <utility>
 
@@ -1257,9 +1256,6 @@ bool ManifestManager::LoadManifest(
         Entry.Path =
             PathString;
 
-        Entry.Size =
-            std::stoull(SizeString);
-
         Entry.Hash =
             Hash;
 
@@ -1858,17 +1854,6 @@ FileDownloader::FileDownloader()
         };
 }
 
-void FileDownloader::SetSessionId(
-    const std::string& NewSessionId)
-{
-    SessionId = NewSessionId;
-}
-
-const std::string& FileDownloader::GetSessionId() const
-{
-    return SessionId;
-}
-
 void FileDownloader::SetProgressCallback(
     ProgressCallback Callback)
 {
@@ -1981,17 +1966,9 @@ bool FileDownloader::DownloadFile(
 
     uintmax_t Downloaded = 0;
 
-    httplib::Headers Headers;
-
-    Headers.emplace(
-        "X-Updater-Session",
-        SessionId
-    );
-
     auto Result =
         Client.Get(
             RequestPath.c_str(),
-            Headers,
             [&](const char* Data,
                 size_t DataSize)
             {
@@ -2259,17 +2236,6 @@ void FileUpdater::PrintOverallProgress(
 }
 
 
-void FileUpdater::SetSessionId(
-    const std::string& SessionId)
-{
-    Downloader.SetSessionId(SessionId);
-}
-
-const std::string& FileUpdater::GetSessionId() const
-{
-    return Downloader.GetSessionId();
-}
-
 bool FileUpdater::ShouldUpdate(
     const std::string& RelativePath,
     bool CfgOnly) const
@@ -2442,42 +2408,6 @@ bool FileUpdater::Update(
 {
     size_t Updated = 0;
 
-    TotalBytes = 0;
-    CompletedBytes = 0;
-    CurrentFileDownloaded = 0;
-
-    // Calculate the size of only those files that actually need updating.
-    for (const auto& [Path, RemoteEntry] :
-         Remote)
-    {
-        if (!ShouldUpdate(
-                Path,
-                CfgOnly))
-        {
-            continue;
-        }
-
-        auto LocalIt =
-            Local.find(Path);
-
-        bool NeedsUpdate =
-            false;
-
-        if (LocalIt == Local.end())
-        {
-            NeedsUpdate = true;
-        }
-        else if (ToLower(
-                     LocalIt->second.Hash) !=
-                 ToLower(
-                     RemoteEntry.Hash))
-        {
-            NeedsUpdate = true;
-        }
-
-        if (NeedsUpdate)
-            TotalBytes += RemoteEntry.Size;
-    }
 
     for (const auto& [Path, RemoteEntry] :
          Remote)
@@ -2638,9 +2568,6 @@ bool FileUpdater::Update(
             return false;
         }
 
-        CompletedBytes += CurrentFileDownloaded;
-        CurrentFileDownloaded = 0;
-
 
         ++Updated;
 
@@ -2736,204 +2663,8 @@ bool FileUpdater::DeleteUntrackedFiles(
 // Updater
 // ============================================================
 
-Updater::Updater()
-{
-    // Load the persistent client session once when the updater starts.
-    // Update() also reloads it before an actual update operation so
-    // Session.txt remains the source of truth.
-    if (!LoadOrCreateSession())
-    {
-        std::cout
-            << "[ERROR] Failed to initialize updater session.\n";
-    }
+Updater::Updater() = default;
 
-    FileUpdater.SetSessionId(SessionId);
-}
-
-bool Updater::LoadOrCreateSession()
-{
-    std::error_code Error;
-
-    if (fs::exists(SessionPath, Error))
-    {
-        if (Error)
-        {
-            std::cout
-                << "[SESSION] Failed to access "
-                << SessionPath
-                << ": "
-                << Error.message()
-                << '\n';
-
-            return false;
-        }
-
-        return LoadSession();
-    }
-
-    if (Error)
-    {
-        std::cout
-            << "[SESSION] Failed to check "
-            << SessionPath
-            << ": "
-            << Error.message()
-            << '\n';
-
-        return false;
-    }
-
-    return CreateSession();
-}
-
-bool Updater::LoadSession()
-{
-    std::ifstream File(
-        SessionPath
-    );
-
-    if (!File)
-    {
-        std::cout
-            << "[SESSION] Cannot open "
-            << SessionPath
-            << '\n';
-
-        return false;
-    }
-
-    std::string LoadedSession;
-
-    std::getline(
-        File,
-        LoadedSession
-    );
-
-    LoadedSession = Trim(LoadedSession);
-
-    // Session IDs generated below are 32 hexadecimal characters.
-    if (LoadedSession.size() != 32)
-    {
-        std::cout
-            << "[SESSION] Invalid session ID in "
-            << SessionPath
-            << ". Generating a new one.\n";
-
-        return CreateSession();
-    }
-
-    for (const unsigned char Character : LoadedSession)
-    {
-        if (!std::isxdigit(Character))
-        {
-            std::cout
-                << "[SESSION] Invalid session ID in "
-                << SessionPath
-                << ". Generating a new one.\n";
-
-            return CreateSession();
-        }
-    }
-
-    SessionId = LoadedSession;
-
-    return true;
-}
-
-bool Updater::CreateSession()
-{
-    SessionId = GenerateSessionId();
-
-    if (SessionId.empty())
-    {
-        std::cout
-            << "[SESSION] Failed to generate session ID.\n";
-
-        return false;
-    }
-
-    if (!SaveSession())
-    {
-        std::cout
-            << "[SESSION] Failed to save session ID to "
-            << SessionPath
-            << '\n';
-
-        return false;
-    }
-
-    if (!SessionPrinted)
-    {
-        std::cout
-            << "[SESSION] "
-            << SessionId
-            << '\n';
-
-        SessionPrinted = true;
-    }
-
-    return true;
-}
-
-std::string Updater::GenerateSessionId() const
-{
-    unsigned char Bytes[16]{};
-
-    if (BCryptGenRandom(
-            nullptr,
-            Bytes,
-            sizeof(Bytes),
-            BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
-    {
-        const auto Now =
-            std::chrono::high_resolution_clock::now()
-                .time_since_epoch()
-                .count();
-
-        for (size_t Index = 0;
-             Index < sizeof(Bytes);
-             ++Index)
-        {
-            Bytes[Index] =
-                static_cast<unsigned char>(
-                    (Now >> ((Index % sizeof(Now)) * 8)) & 0xFF
-                );
-        }
-    }
-
-    std::ostringstream Result;
-
-    Result
-        << std::uppercase
-        << std::hex
-        << std::setfill('0');
-
-    for (const unsigned char Byte : Bytes)
-    {
-        Result
-            << std::setw(2)
-            << static_cast<int>(Byte);
-    }
-
-    return Result.str();
-}
-
-bool Updater::SaveSession() const
-{
-    std::ofstream File(
-        SessionPath,
-        std::ios::trunc
-    );
-
-    if (!File)
-        return false;
-
-    File
-        << SessionId
-        << '\n';
-
-    return static_cast<bool>(File);
-}
 
 void Updater::SetServerUrl(const std::string& Url)
 {
@@ -3327,17 +3058,6 @@ void Updater::CompareCfg()
 void Updater::Update(
     bool CfgOnly)
 {
-    // Session.txt is the persistent source of truth.
-    if (!LoadOrCreateSession())
-    {
-        std::cout
-            << "Update cancelled: session initialization failed.\n";
-
-        return;
-    }
-
-    FileUpdater.SetSessionId(SessionId);
-
     std::cout
         << "Downloading remote manifest...\n";
 
