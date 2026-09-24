@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <filesystem>
 #include <cstdint>
+#include <functional>
 
 namespace fs = std::filesystem;
 
@@ -17,6 +18,7 @@ namespace fs = std::filesystem;
 struct ManifestEntry
 {
     std::string Path;
+    uintmax_t Size = 0;
     std::string Hash;
 };
 
@@ -96,18 +98,10 @@ class ManifestManager
 {
 public:
 
-    // --------------------------------------------------------
-    // Remote manifest
-    // --------------------------------------------------------
-
     bool DownloadManifest(
         const std::string& Url,
         const fs::path& OutputPath
     );
-
-    // --------------------------------------------------------
-    // Local manifest generation
-    // --------------------------------------------------------
 
     bool GenerateCfgManifest();
 
@@ -115,27 +109,15 @@ public:
 
     bool GenerateBothManifests();
 
-    // --------------------------------------------------------
-    // Manifest loading
-    // --------------------------------------------------------
-
     bool LoadManifest(
         const fs::path& Path,
         Manifest& OutManifest
     ) const;
 
-    // --------------------------------------------------------
-    // Manifest comparison
-    // --------------------------------------------------------
-
     ManifestCompareResult Compare(
         const Manifest& Local,
         const Manifest& Remote
     ) const;
-
-    // --------------------------------------------------------
-    // Helpers
-    // --------------------------------------------------------
 
     size_t CountFiles(
         const Manifest& ManifestData
@@ -151,19 +133,11 @@ class FileScanner
 {
 public:
 
-    // --------------------------------------------------------
-    // General scan
-    // --------------------------------------------------------
-
     std::vector<FileInfo> ScanAll() const;
 
     std::vector<FileInfo> ScanCfg() const;
 
     std::vector<FileInfo> ScanNonCfg() const;
-
-    // --------------------------------------------------------
-    // Count
-    // --------------------------------------------------------
 
     size_t CountAll() const;
 
@@ -197,6 +171,16 @@ class FileDownloader
 {
 public:
 
+    using ProgressCallback =
+        std::function<void(
+            uintmax_t Downloaded,
+            uintmax_t Total
+        )>;
+
+public:
+
+    FileDownloader();
+
     bool DownloadFile(
         const std::string& Url,
         const fs::path& Destination
@@ -205,6 +189,22 @@ public:
     bool DownloadFiles(
         const std::vector<std::string>& Paths
     );
+
+    void SetSessionId(
+        const std::string& NewSessionId
+    );
+
+    const std::string& GetSessionId() const;
+
+    void SetProgressCallback(
+        ProgressCallback Callback
+    );
+
+private:
+
+    std::string SessionId;
+
+    ProgressCallback Progress;
 };
 
 
@@ -216,9 +216,7 @@ class FileUpdater
 {
 public:
 
-    // --------------------------------------------------------
-    // Update
-    // --------------------------------------------------------
+    FileUpdater();
 
     bool Update(
         const Manifest& Local,
@@ -226,22 +224,20 @@ public:
         bool CfgOnly
     );
 
-    // --------------------------------------------------------
-    // Update individual files
-    // --------------------------------------------------------
-
     bool UpdateFile(
         const std::string& RelativePath
     );
-
-    // --------------------------------------------------------
-    // Delete untracked files
-    // --------------------------------------------------------
 
     bool DeleteUntrackedFiles(
         const Manifest& ManifestData,
         bool CfgOnly
     );
+
+    void SetSessionId(
+        const std::string& SessionId
+    );
+
+    const std::string& GetSessionId() const;
 
 private:
 
@@ -253,6 +249,19 @@ private:
     bool IsExcluded(
         const fs::path& Path
     ) const;
+
+    void PrintOverallProgress(
+        uintmax_t Downloaded,
+        uintmax_t Total
+    );
+
+private:
+
+    FileDownloader Downloader;
+
+    uintmax_t TotalBytes = 0;
+    uintmax_t CompletedBytes = 0;
+    uintmax_t CurrentFileDownloaded = 0;
 };
 
 
@@ -264,23 +273,19 @@ class Updater
 {
 public:
 
-    void Run();
-    
-    void SetServerUrl(const std::string& Url);
-    
-private:
+    Updater();
 
-    // ========================================================
-    // Console
-    // ========================================================
+    void Run();
+
+    void SetServerUrl(
+        const std::string& Url
+    );
+
+private:
 
     void PrintHelp();
 
     void PrintPrompt();
-
-    // ========================================================
-    // Commands
-    // ========================================================
 
     void Scan();
 
@@ -302,10 +307,6 @@ private:
         bool CfgOnly
     );
 
-    // ========================================================
-    // Common operations
-    // ========================================================
-
     bool DownloadRemoteManifest(
         bool CfgOnly
     );
@@ -323,10 +324,6 @@ private:
         bool CfgOnly
     );
 
-    // ========================================================
-    // Utilities
-    // ========================================================
-
     void PrintCompareResult(
         const ManifestCompareResult& Result
     );
@@ -338,16 +335,33 @@ private:
 private:
 
     // ========================================================
-    // Components
+    // Session
     // ========================================================
+
+    bool LoadOrCreateSession();
+
+    bool LoadSession();
+
+    bool CreateSession();
+
+    std::string GenerateSessionId() const;
+
+    bool SaveSession() const;
+
+private:
 
     ManifestManager ManifestManager;
 
     FileScanner FileScanner;
 
-    FileDownloader FileDownloader;
-
     FileUpdater FileUpdater;
+
+    std::string SessionId;
+
+    fs::path SessionPath =
+        "Session.txt";
+
+    bool SessionPrinted = false;
 
 
     // ========================================================
@@ -359,32 +373,17 @@ private:
     fs::path GeneratorPath =
         "ManifestGenerator.exe";
 
-
-    // --------------------------------------------------------
-    // Local manifests
-    // --------------------------------------------------------
-
     fs::path LocalManifestPath =
         "Manifest.txt";
 
     fs::path LocalCfgManifestPath =
         "CfgManifest.txt";
 
-
-    // --------------------------------------------------------
-    // Downloaded remote manifests
-    // --------------------------------------------------------
-
     fs::path RemoteManifestPath =
         "RemoteManifest.txt";
 
     fs::path RemoteCfgManifestPath =
         "RemoteCfgManifest.txt";
-
-
-    // ========================================================
-    // Generator configuration
-    // ========================================================
 
     fs::path CfgFilesPath =
         "CfgFiles.cfg";
@@ -404,7 +403,7 @@ private:
     // ========================================================
 
     std::string ServerUrl =
-        "http://127.0.0.1:8080/";
+        "http://89.28.48.2:8080/";
 
     std::string ManifestUrl =
         ServerUrl + "manifest";

@@ -19,6 +19,7 @@ FetchContent_MakeAvailable(httplib)
 add_executable(Updater
         src/main.cpp
         src/main.h
+        src/main.cpp
 )
 
 target_link_libraries(Updater PRIVATE httplib::httplib)

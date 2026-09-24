@@ -9,11 +9,13 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
-#include <algorithm> 
+#include <algorithm>
+#include <cctype>
 #include <thread>
 #include <vector>
 #include <chrono>
 #include <system_error>
+#include <utility>
 
 #pragma comment(lib, "bcrypt.lib")
 
@@ -1255,6 +1257,9 @@ bool ManifestManager::LoadManifest(
         Entry.Path =
             PathString;
 
+        Entry.Size =
+            std::stoull(SizeString);
+
         Entry.Hash =
             Hash;
 
@@ -1821,19 +1826,63 @@ size_t FileScanner::CountNonCfg() const
 // FileDownloader
 // ============================================================
 
+FileDownloader::FileDownloader()
+{
+    Progress =
+        [](uintmax_t Downloaded, uintmax_t Total)
+        {
+            if (Total == 0)
+            {
+                std::cout
+                    << "\r  Downloaded: "
+                    << Downloaded / (1024 * 1024)
+                    << " MB";
+
+                std::cout.flush();
+                return;
+            }
+
+            const uintmax_t Percent =
+                (Downloaded * 100) / Total;
+
+            std::cout
+                << "\r  Progress: "
+                << Percent
+                << "% ("
+                << Downloaded / (1024 * 1024)
+                << " / "
+                << Total / (1024 * 1024)
+                << " MB)";
+
+            std::cout.flush();
+        };
+}
+
+void FileDownloader::SetSessionId(
+    const std::string& NewSessionId)
+{
+    SessionId = NewSessionId;
+}
+
+const std::string& FileDownloader::GetSessionId() const
+{
+    return SessionId;
+}
+
+void FileDownloader::SetProgressCallback(
+    ProgressCallback Callback)
+{
+    Progress = std::move(Callback);
+}
+
 bool FileDownloader::DownloadFile(
     const std::string& Url,
     const fs::path& Destination)
 {
     std::cout
-        << "[DOWNLOAD]\n"
-        << "  URL: "
-        << Url
-        << '\n'
-        << "  -> "
-        << Destination
+        << "[DOWNLOAD] "
+        << Destination.generic_string()
         << '\n';
-
 
     /*
         Destination = настоящий путь.
@@ -1847,12 +1896,9 @@ bool FileDownloader::DownloadFile(
     */
 
     const fs::path TempPath =
-        Destination.string() +
-        ".download";
-
+        Destination.string() + ".download";
 
     std::error_code ec;
-
 
     if (!Destination.parent_path().empty())
     {
@@ -1864,7 +1910,9 @@ bool FileDownloader::DownloadFile(
         if (ec)
         {
             std::cout
-                << "Failed to create directory: "
+                << "[FAILED] "
+                << Destination.generic_string()
+                << " - failed to create directory: "
                 << Destination.parent_path()
                 << '\n';
 
@@ -1872,20 +1920,10 @@ bool FileDownloader::DownloadFile(
         }
     }
 
-
     fs::remove(
         TempPath,
         ec
     );
-
-
-    /*
-        cpp-httplib позволяет передавать
-        ContentReceiver.
-
-        Поэтому данные приходят кусками
-        и сразу пишутся на диск.
-    */
 
     std::string BaseUrl;
     std::string RequestPath;
@@ -1896,18 +1934,18 @@ bool FileDownloader::DownloadFile(
             RequestPath))
     {
         std::cout
-            << "Invalid HTTP URL: "
+            << "[FAILED] "
+            << Destination.generic_string()
+            << " - invalid HTTP URL: "
             << Url
             << '\n';
 
         return false;
     }
 
-
     httplib::Client Client(
         BaseUrl
     );
-
 
     Client.set_connection_timeout(
         10,
@@ -1924,77 +1962,75 @@ bool FileDownloader::DownloadFile(
         0
     );
 
-
     std::ofstream File(
         TempPath,
         std::ios::binary
     );
 
-
     if (!File)
     {
         std::cout
-            << "Cannot create temporary file: "
+            << "[FAILED] "
+            << Destination.generic_string()
+            << " - cannot create temporary file: "
             << TempPath
             << '\n';
 
         return false;
     }
 
-
     uintmax_t Downloaded = 0;
 
+    httplib::Headers Headers;
+
+    Headers.emplace(
+        "X-Updater-Session",
+        SessionId
+    );
 
     auto Result =
         Client.Get(
             RequestPath.c_str(),
+            Headers,
             [&](const char* Data,
                 size_t DataSize)
             {
                 File.write(
                     Data,
                     static_cast<std::streamsize>(
-                        DataSize)
+                        DataSize
+                    )
                 );
-
 
                 if (!File)
                     return false;
 
-
                 Downloaded +=
-                    DataSize;
+                    static_cast<uintmax_t>(DataSize);
 
-
-                /*
-                    Пока просто выводим объём.
-
-                    Для больших файлов это позволит
-                    видеть, что загрузка реально идёт.
-                */
-
-                if (Downloaded %
-                    (100 * 1024 * 1024) <
-                    DataSize)
+                return true;
+            },
+            [&](uint64_t Current,
+                uint64_t Total)
+            {
+                if (Progress)
                 {
-                    std::cout
-                        << "  Downloaded: "
-                        << Downloaded /
-                               (1024 * 1024)
-                        << " MB\n";
+                    Progress(
+                        static_cast<uintmax_t>(Current),
+                        static_cast<uintmax_t>(Total)
+                    );
                 }
-
 
                 return true;
             }
         );
 
-
     File.close();
-
 
     if (!Result)
     {
+        std::cout << '\n';
+
         PrintHttpError(Result);
 
         fs::remove(
@@ -2002,14 +2038,22 @@ bool FileDownloader::DownloadFile(
             ec
         );
 
+        std::cout
+            << "[FAILED] "
+            << Destination.generic_string()
+            << " - download interrupted\n";
+
         return false;
     }
 
-
     if (Result->status != 200)
     {
+        std::cout << '\n';
+
         std::cout
-            << "Download failed. HTTP "
+            << "[FAILED] "
+            << Destination.generic_string()
+            << " - HTTP "
             << Result->status
             << '\n';
 
@@ -2021,27 +2065,36 @@ bool FileDownloader::DownloadFile(
         return false;
     }
 
-
     if (!fs::exists(
             TempPath,
             ec))
     {
         std::cout
-            << "Temporary file was not created.\n";
+            << "[FAILED] "
+            << Destination.generic_string()
+            << " - temporary file was not created.\n";
 
         return false;
     }
 
+    std::cout
+        << '\r'
+        << "  Progress: 100%"
+        << " ("
+        << Downloaded / (1024 * 1024)
+        << " MB)"
+        << "                                      "
+        << '\n';
 
     std::cout
-        << "Download finished: "
+        << "[DONE] "
+        << Destination.generic_string()
+        << " - "
         << Downloaded
         << " bytes\n";
 
-
     return true;
 }
-
 
 bool FileDownloader::DownloadFiles(
     const std::vector<std::string>& Paths)
@@ -2050,62 +2103,46 @@ bool FileDownloader::DownloadFiles(
          Paths)
     {
         const std::string Normalized =
-
             NormalizeManifestPath(
-
                 RelativePath
-
             );
 
-
         // Manifest paths include the local files/ prefix.
-
         // The server /file endpoint is already rooted at files/.
 
         std::string ServerPath =
-
             Normalized;
 
-
         if (ServerPath.rfind("files/", 0) == 0)
-
         {
-
             ServerPath.erase(0, 6);
-
         }
-
 
         if (!IsSafeRelativePath(ServerPath))
         {
             std::cout
-                << "Unsafe download path: "
+                << "[FAILED] Unsafe download path: "
                 << RelativePath
                 << '\n';
 
             return false;
         }
 
-
         const std::string Encoded =
             UrlEncodePath(
                 ServerPath
             );
-
 
         const std::string Url =
             ServerUrl +
             "file/" +
             Encoded;
 
-
         const fs::path Destination =
             fs::path(Normalized);
 
         const fs::path TempPath =
-            Destination.string() +
-            ".download";
-
+            Destination.string() + ".download";
 
         if (!DownloadFile(
                 Url,
@@ -2118,7 +2155,6 @@ bool FileDownloader::DownloadFiles(
 
             return false;
         }
-
 
         std::error_code ec;
 
@@ -2138,7 +2174,7 @@ bool FileDownloader::DownloadFiles(
         if (ec)
         {
             std::cout
-                << "Failed to finalize download: "
+                << "[FAILED] Failed to finalize download: "
                 << RelativePath
                 << '\n'
                 << "Error: "
@@ -2149,7 +2185,6 @@ bool FileDownloader::DownloadFiles(
         }
     }
 
-
     return true;
 }
 
@@ -2157,6 +2192,83 @@ bool FileDownloader::DownloadFiles(
 // ============================================================
 // FileUpdater
 // ============================================================
+
+FileUpdater::FileUpdater()
+{
+    Downloader.SetProgressCallback(
+        [this](uintmax_t Downloaded, uintmax_t Total)
+        {
+            PrintOverallProgress(Downloaded, Total);
+        }
+    );
+}
+
+
+void FileUpdater::PrintOverallProgress(
+    uintmax_t Downloaded,
+    uintmax_t Total)
+{
+    CurrentFileDownloaded = Downloaded;
+
+    const uintmax_t OverallDownloaded =
+        CompletedBytes + Downloaded;
+
+    uintmax_t OverallPercent = 0;
+
+    if (TotalBytes > 0)
+    {
+        OverallPercent = static_cast<uintmax_t>(
+            (static_cast<long double>(OverallDownloaded) * 100.0L) /
+            static_cast<long double>(TotalBytes)
+        );
+
+        if (OverallPercent > 100)
+            OverallPercent = 100;
+    }
+
+    uintmax_t FilePercent = 0;
+
+    if (Total > 0)
+    {
+        FilePercent = static_cast<uintmax_t>(
+            (static_cast<long double>(Downloaded) * 100.0L) /
+            static_cast<long double>(Total)
+        );
+
+        if (FilePercent > 100)
+            FilePercent = 100;
+    }
+
+    std::cout
+        << "\r  File: "
+        << FilePercent
+        << "% ("
+        << Downloaded / (1024 * 1024)
+        << " / "
+        << Total / (1024 * 1024)
+        << " MB)"
+        << " | Overall: "
+        << OverallPercent
+        << "% ("
+        << OverallDownloaded / (1024 * 1024)
+        << " / "
+        << TotalBytes / (1024 * 1024)
+        << " MB)";
+
+    std::cout.flush();
+}
+
+
+void FileUpdater::SetSessionId(
+    const std::string& SessionId)
+{
+    Downloader.SetSessionId(SessionId);
+}
+
+const std::string& FileUpdater::GetSessionId() const
+{
+    return Downloader.GetSessionId();
+}
 
 bool FileUpdater::ShouldUpdate(
     const std::string& RelativePath,
@@ -2297,8 +2409,6 @@ bool FileUpdater::UpdateFile(
     }
 
 
-    FileDownloader Downloader;
-
     if (!Downloader.DownloadFile(
             Url,
             Destination))
@@ -2332,6 +2442,42 @@ bool FileUpdater::Update(
 {
     size_t Updated = 0;
 
+    TotalBytes = 0;
+    CompletedBytes = 0;
+    CurrentFileDownloaded = 0;
+
+    // Calculate the size of only those files that actually need updating.
+    for (const auto& [Path, RemoteEntry] :
+         Remote)
+    {
+        if (!ShouldUpdate(
+                Path,
+                CfgOnly))
+        {
+            continue;
+        }
+
+        auto LocalIt =
+            Local.find(Path);
+
+        bool NeedsUpdate =
+            false;
+
+        if (LocalIt == Local.end())
+        {
+            NeedsUpdate = true;
+        }
+        else if (ToLower(
+                     LocalIt->second.Hash) !=
+                 ToLower(
+                     RemoteEntry.Hash))
+        {
+            NeedsUpdate = true;
+        }
+
+        if (NeedsUpdate)
+            TotalBytes += RemoteEntry.Size;
+    }
 
     for (const auto& [Path, RemoteEntry] :
          Remote)
@@ -2492,6 +2638,9 @@ bool FileUpdater::Update(
             return false;
         }
 
+        CompletedBytes += CurrentFileDownloaded;
+        CurrentFileDownloaded = 0;
+
 
         ++Updated;
 
@@ -2586,6 +2735,205 @@ bool FileUpdater::DeleteUntrackedFiles(
 // ============================================================
 // Updater
 // ============================================================
+
+Updater::Updater()
+{
+    // Load the persistent client session once when the updater starts.
+    // Update() also reloads it before an actual update operation so
+    // Session.txt remains the source of truth.
+    if (!LoadOrCreateSession())
+    {
+        std::cout
+            << "[ERROR] Failed to initialize updater session.\n";
+    }
+
+    FileUpdater.SetSessionId(SessionId);
+}
+
+bool Updater::LoadOrCreateSession()
+{
+    std::error_code Error;
+
+    if (fs::exists(SessionPath, Error))
+    {
+        if (Error)
+        {
+            std::cout
+                << "[SESSION] Failed to access "
+                << SessionPath
+                << ": "
+                << Error.message()
+                << '\n';
+
+            return false;
+        }
+
+        return LoadSession();
+    }
+
+    if (Error)
+    {
+        std::cout
+            << "[SESSION] Failed to check "
+            << SessionPath
+            << ": "
+            << Error.message()
+            << '\n';
+
+        return false;
+    }
+
+    return CreateSession();
+}
+
+bool Updater::LoadSession()
+{
+    std::ifstream File(
+        SessionPath
+    );
+
+    if (!File)
+    {
+        std::cout
+            << "[SESSION] Cannot open "
+            << SessionPath
+            << '\n';
+
+        return false;
+    }
+
+    std::string LoadedSession;
+
+    std::getline(
+        File,
+        LoadedSession
+    );
+
+    LoadedSession = Trim(LoadedSession);
+
+    // Session IDs generated below are 32 hexadecimal characters.
+    if (LoadedSession.size() != 32)
+    {
+        std::cout
+            << "[SESSION] Invalid session ID in "
+            << SessionPath
+            << ". Generating a new one.\n";
+
+        return CreateSession();
+    }
+
+    for (const unsigned char Character : LoadedSession)
+    {
+        if (!std::isxdigit(Character))
+        {
+            std::cout
+                << "[SESSION] Invalid session ID in "
+                << SessionPath
+                << ". Generating a new one.\n";
+
+            return CreateSession();
+        }
+    }
+
+    SessionId = LoadedSession;
+
+    return true;
+}
+
+bool Updater::CreateSession()
+{
+    SessionId = GenerateSessionId();
+
+    if (SessionId.empty())
+    {
+        std::cout
+            << "[SESSION] Failed to generate session ID.\n";
+
+        return false;
+    }
+
+    if (!SaveSession())
+    {
+        std::cout
+            << "[SESSION] Failed to save session ID to "
+            << SessionPath
+            << '\n';
+
+        return false;
+    }
+
+    if (!SessionPrinted)
+    {
+        std::cout
+            << "[SESSION] "
+            << SessionId
+            << '\n';
+
+        SessionPrinted = true;
+    }
+
+    return true;
+}
+
+std::string Updater::GenerateSessionId() const
+{
+    unsigned char Bytes[16]{};
+
+    if (BCryptGenRandom(
+            nullptr,
+            Bytes,
+            sizeof(Bytes),
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+    {
+        const auto Now =
+            std::chrono::high_resolution_clock::now()
+                .time_since_epoch()
+                .count();
+
+        for (size_t Index = 0;
+             Index < sizeof(Bytes);
+             ++Index)
+        {
+            Bytes[Index] =
+                static_cast<unsigned char>(
+                    (Now >> ((Index % sizeof(Now)) * 8)) & 0xFF
+                );
+        }
+    }
+
+    std::ostringstream Result;
+
+    Result
+        << std::uppercase
+        << std::hex
+        << std::setfill('0');
+
+    for (const unsigned char Byte : Bytes)
+    {
+        Result
+            << std::setw(2)
+            << static_cast<int>(Byte);
+    }
+
+    return Result.str();
+}
+
+bool Updater::SaveSession() const
+{
+    std::ofstream File(
+        SessionPath,
+        std::ios::trunc
+    );
+
+    if (!File)
+        return false;
+
+    File
+        << SessionId
+        << '\n';
+
+    return static_cast<bool>(File);
+}
 
 void Updater::SetServerUrl(const std::string& Url)
 {
@@ -2979,6 +3327,17 @@ void Updater::CompareCfg()
 void Updater::Update(
     bool CfgOnly)
 {
+    // Session.txt is the persistent source of truth.
+    if (!LoadOrCreateSession())
+    {
+        std::cout
+            << "Update cancelled: session initialization failed.\n";
+
+        return;
+    }
+
+    FileUpdater.SetSessionId(SessionId);
+
     std::cout
         << "Downloading remote manifest...\n";
 
